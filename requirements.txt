@@ -1,0 +1,30 @@
+# Core CV / ML
+ultralytics>=8.3.0        # YOLO26n detector (swappable via config.py)
+supervision>=0.24.0,<0.30 # ByteTrack tracking + utils (ByteTrack removed in 0.30)
+opencv-python>=4.9.0
+numpy>=1.26.0
+Pillow>=10.4.0
+# torch/torchvision are pulled in by ultralytics. On a CPU-only machine install
+# the CPU wheels first to avoid ~2.5GB of CUDA packages:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Dashboard
+streamlit>=1.38.0
+plotly>=5.24.0
+
+# Data / analytics
+pandas>=2.2.0
+matplotlib>=3.8.0          # report chart rendering (also an ultralytics dep)
+
+# Database
+SQLAlchemy>=2.0.30
+
+# Reports
+openpyxl>=3.1.5           # Excel export
+fpdf2>=2.7.9               # PDF export
+
+# Configuration / misc
+PyYAML>=6.0.2
+python-dotenv>=1.0.1

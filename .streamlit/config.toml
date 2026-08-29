@@ -1,0 +1,21 @@
+# Streamlit base theme for CafeAnalytics.
+# Custom component styling is injected as CSS at runtime (see
+# dashboard/theme.py); this file sets the framework-level palette so
+# native widgets match the brand.
+
+[theme]
+base = "dark"
+primaryColor = "#6C5CE7"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#161A23"
+textColor = "#E6E9EF"
+font = "sans serif"
+
+[server]
+headless = false
+runOnSave = true
+maxUploadSize = 4096
+maxMessageSize = 1024
+
+[browser]
+gatherUsageStats = false

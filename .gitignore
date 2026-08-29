@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.local
+
+# Model weights
+models/*.pt
+models/*.onnx
+models/*.engine
+!models/README.md
+
+# Runtime data
+logs/*.log
+logs/*.log.*
+!logs/.gitkeep
+
+outputs/**/*
+!outputs/**/.gitkeep
+
+reports/generated/*
+!reports/generated/.gitkeep
+
+videos/sample/*
+videos/uploads/*
+!videos/sample/.gitkeep
+!videos/uploads/.gitkeep
+
+# Database
+*.db
+*.sqlite3
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
