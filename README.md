@@ -1,13 +1,5 @@
 # 🏢 FlatTrace AI — Demo Flat Visitor & Salesperson Tour Intelligence
 
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
-[![Framework](https://img.shields.io/badge/framework-Streamlit%20%7C%20OpenCV-FF4B4B.svg)](https://streamlit.io/)
-[![YOLO Detection](https://img.shields.io/badge/YOLO-v26n%20%2F%20Ultralytics-00FFFF.svg)](https://docs.ultralytics.com/)
-[![Tracking & ReID](https://img.shields.io/badge/Tracking-ByteTrack%20%2B%20Multi--View%20ReID-green.svg)](https://github.com/roboflow/supervision)
-[![LLM Vision](https://img.shields.io/badge/LLM%20Vision-Groq%20%7C%20Gemini%20%7C%20OpenAI-orange.svg)](https://groq.com)
-[![Database](https://img.shields.io/badge/Database-SQLAlchemy%20%7C%20SQLite-lightgrey.svg)](https://www.sqlalchemy.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-
 An intelligent, real-time **Computer Vision & AI system designed for Real Estate Showrooms, Experience Centers, and Demo Flats**.
 
 The platform automatically **traces salespersons as they conduct demo flat walkthroughs, counts and identifies visiting clients, measures tour durations, and generates structured audit logs of every client visit session**.
@@ -225,5 +217,6 @@ python scripts/verify_all.py
 ## 📄 License
 
 Distributed under the **MIT License**. See `LICENSE` for details.
-#   D e m o F l a t - V i s i t o r - A n a l y t i c s  
+#   D e m o F l a t - V i s i t o r - A n a l y t i c s 
+ 
  
