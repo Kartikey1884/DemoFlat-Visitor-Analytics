@@ -2,19 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-
-from utils.timeutils import utcnow
 from typing import Dict, List, Optional
 
 from config import Config, get_config
 from detection.detections import Detections
+from tracking.reid import GlobalPerson, PersonGallery
 from utils.geometry import BBox, Point
 from utils.logger import get_logger
+from utils.timeutils import utcnow
 
 logger = get_logger(__name__)
-
-
-from tracking.reid import GlobalPerson, PersonGallery
 
 
 @dataclass
@@ -35,7 +32,6 @@ class TrackState:
     global_person: Optional[GlobalPerson] = None
     max_trajectory: int = 1024
 
-
     def update(self, box: BBox, anchor: Point, timestamp: datetime, frame_index: int) -> None:
         self.last_box = box
         self.last_seen = timestamp
@@ -53,6 +49,10 @@ class TrackState:
     def mark_missed(self) -> None:
         self.misses += 1
 
+    @property
+    def is_confirmed(self) -> bool:
+        """Returns True if the person has been identified and confirmed via face/ReID."""
+        return self.global_person is not None and self.global_id is not None
 
     @property
     def duration_seconds(self) -> float:
@@ -70,7 +70,7 @@ class TrackState:
             role_tag = "Sales Agent" if self.role == "sales_person" else "Visitor"
             dwell_str = self._format_seconds(self.duration_seconds)
             return f"[{role_tag} {self.global_person.global_id} | {dwell_str}]"
-        return f"[ID:{self.track_id}]"
+        return f"[Tracking #{self.track_id} · Awaiting Face]"
 
     def _format_seconds(self, s: float) -> str:
         sec = int(s)
@@ -83,6 +83,7 @@ class TrackState:
             "global_id": self.global_id,
             "class_id": self.class_id,
             "role": self.role,
+            "is_confirmed": self.is_confirmed,
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
             "duration_seconds": self.duration_seconds,
@@ -104,6 +105,10 @@ class TrackFrameResult:
     def active_count(self) -> int:
         return len(self.active_tracks)
 
+    @property
+    def confirmed_count(self) -> int:
+        return sum(1 for t in self.active_tracks if t.is_confirmed)
+
 
 class TrackManager:
     def __init__(
@@ -117,7 +122,6 @@ class TrackManager:
         self.max_trajectory = max_trajectory
         self.gallery = gallery or PersonGallery(self.config)
         self._states: Dict[int, TrackState] = {}
-
 
     def update(
         self,
@@ -145,7 +149,7 @@ class TrackManager:
                     gp = self.gallery.get_by_track(tid)
 
                 role = gp.role if gp else "visitor"
-                gid = gp.global_id if gp else f"P-{tid:03d}"
+                gid = gp.global_id if gp else None
                 state = TrackState(
                     track_id=tid,
                     class_id=det.class_id,
@@ -162,12 +166,29 @@ class TrackManager:
                 )
                 self._states[tid] = state
                 entered.append(state)
-                logger.debug("Track %d (Global: %s, Role: %s) entered at frame %d.", tid, gid, role, frame_index)
+                logger.debug(
+                    "Track %d (Global: %s, Confirmed: %s) entered at frame %d.",
+                    tid,
+                    gid,
+                    state.is_confirmed,
+                    frame_index,
+                )
             else:
                 # Existing track continuing in frame
                 state.update(det.box, det.anchor, ts, frame_index)
                 if frame is not None and len(frame.shape) >= 2:
-                    self.gallery.update_active_person_appearance(frame, det.box, tid)
+                    gp = self.gallery.update_active_person_appearance(frame, det.box, tid, ts)
+                    # If this track was provisional and has just been confirmed via face view:
+                    if state.global_person is None and gp is not None:
+                        state.global_person = gp
+                        state.global_id = gp.global_id
+                        state.role = gp.role
+                        logger.info(
+                            "✅ Track #%d successfully confirmed as %s (%s) upon frontal face detection.",
+                            tid,
+                            gp.global_id,
+                            gp.display_name,
+                        )
 
         exited: List[TrackState] = []
         for tid, state in self._states.items():
@@ -189,7 +210,6 @@ class TrackManager:
             exited_tracks=exited,
             gallery=self.gallery,
         )
-
 
     def get_active(self) -> List[TrackState]:
         return [s for s in self._states.values() if s.active]

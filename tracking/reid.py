@@ -12,13 +12,16 @@ import cv2
 import numpy as np
 
 from config import Config, get_config
+from tracking.face_verifier import FacePoseResult, FacePoseVerifier
+from tracking.llm_person_profiler import (
+    LLMPersonProfiler,
+    LLMReIDDecision,
+    PersonSemanticProfile,
+)
 from utils.logger import get_logger
 from utils.timeutils import utcnow
 
 logger = get_logger(__name__)
-
-
-from tracking.llm_person_profiler import LLMPersonProfiler, PersonSemanticProfile, LLMReIDDecision
 
 
 @dataclass
@@ -37,7 +40,7 @@ class GlobalPerson:
     display_name: str
     role: str = "visitor"  # "visitor" or "sales_person"
     embedding: Optional[np.ndarray] = None  # Primary representative embedding
-    embeddings: List[np.ndarray] = field(default_factory=list)  # Multi-view memory bank (up to 12 templates)
+    embeddings: List[np.ndarray] = field(default_factory=list)  # Multi-view memory bank (up to 16 templates)
     clothing_signatures: List[ClothingSignature] = field(default_factory=list)  # Clothing memory bank
     semantic_profile: Optional[PersonSemanticProfile] = None  # LLM extracted persona and clothing profile
     llm_reasoning: str = ""  # Latest LLM decision reasoning
@@ -51,9 +54,12 @@ class GlobalPerson:
     thumbnail_path: Optional[str] = None
     thumbnail_base64: Optional[str] = None
     frames_tracked: int = 0
+    face_score: float = 0.0  # Quality score of primary frontal face capture
+    has_verified_face: bool = False  # True once verified from frontal/face perspective
+    view_angles: List[str] = field(default_factory=list)
 
-    def add_feature_template(self, signature: ClothingSignature, max_templates: int = 12) -> None:
-        """Adds an appearance template to the person's memory bank."""
+    def add_feature_template(self, signature: ClothingSignature, max_templates: int = 16) -> None:
+        """Adds an appearance template to the person's multi-view memory bank."""
         self.clothing_signatures.append(signature)
         self.embeddings.append(signature.composite)
         if len(self.clothing_signatures) > max_templates:
@@ -98,6 +104,8 @@ class GlobalPerson:
             "is_active": self.is_active,
             "current_track_id": self.current_track_id,
             "thumbnail_path": self.thumbnail_path,
+            "has_verified_face": self.has_verified_face,
+            "face_score": round(self.face_score, 2),
             "semantic_profile": self.semantic_profile.to_dict() if self.semantic_profile else None,
             "llm_reasoning": self.llm_reasoning,
         }
@@ -178,7 +186,7 @@ class ReIDFeatureExtractor:
             return None
 
         h, w = crop.shape[:2]
-        
+
         # Center-weighted regions to minimize background noise
         x_min, x_max = int(w * 0.10), int(w * 0.90)
         if x_max <= x_min:
@@ -256,12 +264,16 @@ class ReIDFeatureExtractor:
 
 
 class PersonGallery:
-    """Maintains unique registered persons with multi-view appearance memory banks and ReID."""
+    """
+    Maintains unique registered persons with Face/Frontal orientation gating,
+    multi-view appearance memory banks, and biometric ReID.
+    """
 
     def __init__(self, config: Optional[Config] = None) -> None:
         self.config = config or get_config()
         self.reid_cfg = self.config.reid
         self.extractor = ReIDFeatureExtractor(self.config)
+        self.face_verifier = FacePoseVerifier()
         self.similarity_threshold = self.reid_cfg.similarity_threshold
         self.momentum = self.reid_cfg.momentum
 
@@ -341,11 +353,12 @@ class PersonGallery:
         box: Tuple[float, float, float, float],
         track_id: int,
         timestamp: datetime,
-    ) -> Tuple[GlobalPerson, bool, float]:
+    ) -> Tuple[Optional[GlobalPerson], bool, float]:
         """
-        Matches a detected person crop against INACTIVE gallery persons using
-        multi-region clothing feature matching and Multimodal LLM decision arbitration.
-        Returns: (GlobalPerson, is_new_visitor, similarity_score)
+        Matches a detected person crop against INACTIVE gallery persons.
+        Gated by Facial / Frontal Verification: A NEW person is only created if their
+        face / frontal view is clearly identified, preventing back-of-head phantom registrations.
+        Returns: (Optional[GlobalPerson], is_new_visitor, similarity_score)
         """
         # If this track ID is already mapped and active, retrieve it directly
         if track_id in self._track_to_global:
@@ -369,11 +382,13 @@ class PersonGallery:
         else:
             current_signature = self.extractor.extract_signature(crop)
 
+        # 1. Evaluate Face & Pose Orientation
+        face_info: FacePoseResult = self.face_verifier.detect_face_and_pose(crop)
+
         # Extract immediate visual persona profile (instant 2ms)
         current_profile = self.profiler._extract_local_vision_profile(crop, f"Track-{track_id}")
 
-        # Compare ONLY against INACTIVE persons (persons who previously left into interior rooms)
-        # Physically active persons on screen are strictly excluded
+        # 2. Compare against INACTIVE persons (persons who previously left into interior rooms)
         candidate_matches: List[Tuple[GlobalPerson, float]] = []
 
         if current_signature is not None and len(self._persons) > 0:
@@ -391,52 +406,62 @@ class PersonGallery:
                 elif person.embedding is not None:
                     person_sim = float(np.dot(current_signature.composite, person.embedding))
 
-                if person_sim >= 0.45:  # Consider candidate
+                if person_sim >= 0.50:  # Candidate match
                     candidate_matches.append((person, person_sim))
 
         # Sort candidate matches by highest similarity first
         candidate_matches.sort(key=lambda x: x[1], reverse=True)
 
-        # LLM Re-ID Decision Arbiter
-        reid_decision = self.profiler.decide_reid_match(
-            crop=crop,
-            track_id=track_id,
-            current_profile=current_profile,
-            candidates=candidate_matches,
-        )
-        self.llm_decisions.append(reid_decision)
-        if len(self.llm_decisions) > 50:
-            self.llm_decisions.pop(0)
+        # 3. Decision Arbitration for Returning Visitors
+        if candidate_matches:
+            best_cand, best_sim = candidate_matches[0]
+            if best_sim >= 0.56:
+                # Re-ID Match Found for returning person
+                person = best_cand
+                was_inactive = not person.is_active
 
-        # Apply LLM Decision
-        if reid_decision.decision == "MATCH" and reid_decision.matched_global_id in self._persons:
-            person = self._persons[reid_decision.matched_global_id]
-            was_inactive = not person.is_active
+                if current_signature is not None:
+                    person.add_feature_template(current_signature)
 
-            if current_signature is not None:
-                person.add_feature_template(current_signature)
+                # If face is now visible with higher quality, upgrade the primary face thumbnail
+                if face_info.is_frontal_or_profile and face_info.face_score > person.face_score:
+                    thumb_path, thumb_b64 = self._save_thumbnail(crop, person.global_id)
+                    if thumb_path:
+                        person.thumbnail_path = thumb_path
+                        person.thumbnail_base64 = thumb_b64
+                    person.face_score = face_info.face_score
+                    person.has_verified_face = True
 
-            person.semantic_profile = current_profile
-            person.llm_reasoning = reid_decision.reasoning
+                person.semantic_profile = current_profile
+                person.is_active = True
+                person.current_track_id = track_id
+                person.update_dwell(timestamp)
+                self._track_to_global[track_id] = person.global_id
 
-            if was_inactive:
-                person.visit_count += 1
-                logger.info(
-                    "🤖 LLM Matched Person %s (Role: %s): %s",
-                    person.global_id,
-                    person.role,
-                    reid_decision.reasoning,
-                )
+                if was_inactive:
+                    person.visit_count += 1
+                    logger.info(
+                        "🔄 Re-identified returning %s (%s) with %d%% visual similarity (Orientation: %s).",
+                        person.global_id,
+                        person.display_name,
+                        int(best_sim * 100),
+                        face_info.orientation,
+                    )
 
-            person.is_active = True
-            person.current_track_id = track_id
-            person.update_dwell(timestamp)
-            self._track_to_global[track_id] = person.global_id
-            if crop is not None and crop.size > 0:
-                self.profiler.profile_person_async(crop, person)
-            return person, False, reid_decision.confidence
+                return person, False, best_sim
 
-        # New unique person entered for the first time
+        # 4. Strict Registration Gating:
+        # A NEW person is ONLY registered if their face / frontal view is confirmed.
+        if not face_info.is_frontal_or_profile:
+            # The person is seen from the backside, extreme overhead angle, or head only without face
+            logger.debug(
+                "⏳ Track %d seen from %s (no face detected). Holding provisional status until front/face is shown.",
+                track_id,
+                face_info.orientation,
+            )
+            return None, False, 0.0
+
+        # 5. Create & Register Confirmed New Person (Frontal Face Verified)
         gid = f"P-{self._next_person_idx:03d}"
         self._next_person_idx += 1
 
@@ -448,7 +473,7 @@ class PersonGallery:
             role="visitor",
             embedding=current_signature.composite if current_signature else None,
             semantic_profile=current_profile,
-            llm_reasoning=reid_decision.reasoning,
+            llm_reasoning=f"Frontal face confirmed ({face_info.details})",
             first_seen=timestamp,
             last_seen=timestamp,
             total_dwell_seconds=0.0,
@@ -458,6 +483,9 @@ class PersonGallery:
             last_active_timestamp=timestamp,
             thumbnail_path=thumb_path,
             thumbnail_base64=thumb_b64,
+            face_score=face_info.face_score,
+            has_verified_face=True,
+            view_angles=[face_info.orientation],
         )
         if current_signature is not None:
             person.add_feature_template(current_signature)
@@ -468,10 +496,11 @@ class PersonGallery:
             self.profiler.profile_person_async(crop, person)
 
         logger.info(
-            "🤖 NEW Person registered: %s (Track ID: %d, LLM: %s)",
+            "👤 NEW Person Verified & Registered: %s (Track ID: %d, Face Score: %.2f, Angle: %s)",
             gid,
             track_id,
-            reid_decision.reasoning,
+            face_info.face_score,
+            face_info.orientation,
         )
         return person, True, 1.0
 
@@ -480,26 +509,55 @@ class PersonGallery:
         frame: np.ndarray,
         box: Tuple[float, float, float, float],
         track_id: int,
-    ) -> None:
-        """Periodically captures additional viewpoints/poses while person is moving in front of camera."""
-        gid = self._track_to_global.get(track_id)
-        if not gid:
-            return
-        person = self._persons.get(gid)
-        if not person:
-            return
+        timestamp: Optional[datetime] = None,
+    ) -> Optional[GlobalPerson]:
+        """
+        Periodically captures additional viewpoints/poses while person is moving in front of camera.
+        If track was provisional (waiting for face), dynamically registers them once face is shown.
+        """
+        ts = timestamp or utcnow()
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in box)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        crop = frame[y1:y2, x1:x2]
 
-        # Update every ~20 frames of tracked motion
-        if person.frames_tracked % 20 == 0:
-            h, w = frame.shape[:2]
-            x1, y1, x2, y2 = (int(v) for v in box)
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
-            crop = frame[y1:y2, x1:x2]
-            if crop.shape[0] >= self.reid_cfg.crop_min_size and crop.shape[1] >= self.reid_cfg.crop_min_size:
+        if crop.shape[0] < self.reid_cfg.crop_min_size or crop.shape[1] < self.reid_cfg.crop_min_size:
+            return self.get_by_track(track_id)
+
+        gid = self._track_to_global.get(track_id)
+        
+        # Case A: Track is already registered to a GlobalPerson
+        if gid:
+            person = self._persons.get(gid)
+            if not person:
+                return None
+
+            # Check if a higher-quality frontal face is now visible
+            face_info = self.face_verifier.detect_face_and_pose(crop)
+            if face_info.is_frontal_or_profile and face_info.face_score > (person.face_score + 0.10):
+                thumb_path, thumb_b64 = self._save_thumbnail(crop, person.global_id)
+                if thumb_path:
+                    person.thumbnail_path = thumb_path
+                    person.thumbnail_base64 = thumb_b64
+                person.face_score = face_info.face_score
+                person.has_verified_face = True
+                logger.debug("Updated primary face thumbnail for %s (Score: %.2f)", person.global_id, face_info.face_score)
+
+            # Periodically record multi-angle clothing signatures (front, sides, and back)
+            if person.frames_tracked % 15 == 0:
                 sig = self.extractor.extract_signature(crop)
                 if sig is not None:
                     person.add_feature_template(sig)
+                    if face_info.orientation not in person.view_angles:
+                        person.view_angles.append(face_info.orientation)
+
+            return person
+
+        # Case B: Track was PROVISIONAL (entered from backside/overhead without face)
+        # Check if the person has now turned around and shows their face
+        person, is_new, sim = self.match_or_create(frame, box, track_id, ts)
+        return person
 
     def on_track_lost(self, track_id: int) -> None:
         gid = self._track_to_global.pop(track_id, None)

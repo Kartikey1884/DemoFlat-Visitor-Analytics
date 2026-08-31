@@ -52,7 +52,6 @@ class DetectionConfig:
         default_factory=lambda: {0: "person"}
     )
 
-
 @dataclass
 class TrackingConfig:
     tracker: str = "bytetrack"
@@ -61,7 +60,6 @@ class TrackingConfig:
     minimum_matching_threshold: float = 0.8
     frame_rate: int = 30
     minimum_consecutive_frames: int = 3
-
 
 @dataclass
 class ReIDConfig:

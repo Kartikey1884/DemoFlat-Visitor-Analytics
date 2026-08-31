@@ -1,4 +1,4 @@
-# 🏢 FlatTrace AI — Demo Flat Visitor & Salesperson Tour Intelligence
+# 🏢 DemoFlat-Visitor-Analytics — Real Estate Demo Flat Visitor & Salesperson Tour Intelligence
 
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
 [![Framework](https://img.shields.io/badge/framework-Streamlit%20%7C%20OpenCV-FF4B4B.svg)](https://streamlit.io/)
@@ -224,5 +224,9 @@ python scripts/verify_all.py
 
 ## 📄 License
 
+<<<<<<< Updated upstream
 Distributed under the **MIT License**. See `LICENSE` for details.
 #
+=======
+Distributed under the **MIT License**. See `LICENSE` for details.
+>>>>>>> Stashed changes
