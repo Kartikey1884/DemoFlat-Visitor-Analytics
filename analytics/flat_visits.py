@@ -144,13 +144,29 @@ class FlatVisitTracker:
         ts = timestamp or utcnow()
 
         all_persons = gallery.get_all_persons()
-        active_sales = [p for p in all_persons if p.is_active and p.role == "sales_person"]
+        all_sales = [p for p in all_persons if p.role == "sales_person"]
+        active_sales = [p for p in all_sales if p.is_active]
         active_visitors = [p for p in all_persons if p.is_active and p.role == "visitor"]
         active_visitor_ids = [p.global_id for p in active_visitors]
 
-        # Case A: If there are designated sales persons present
+        # Case A: If there are designated sales persons present right now in frame
         if active_sales:
             for sp in active_sales:
+                # If a general unassigned session was open, claim it immediately
+                if "__general_visit__" in self._active_sessions:
+                    gen_s = self._active_sessions.pop("__general_visit__")
+                    gen_s.sales_person_id = sp.global_id
+                    gen_s.sales_person_name = sp.display_name
+                    if sp.global_id in gen_s.accompanying_visitor_ids:
+                        gen_s.accompanying_visitor_ids.remove(sp.global_id)
+                    self._active_sessions[sp.global_id] = gen_s
+                    self.log_event(
+                        "agent_claimed_session",
+                        f"👔 Sales Agent {sp.display_name} claimed active flat tour ({gen_s.session_id}).",
+                        person_id=sp.global_id,
+                        role="sales_person",
+                    )
+
                 session = self._active_sessions.get(sp.global_id)
                 if session is None:
                     # Start new Flat Visit Session
@@ -191,9 +207,59 @@ class FlatVisitTracker:
                             role="visitor",
                         )
 
-        # Case B: If no sales person is designated yet, but visitors are present in the flat
+        # Case B: Sales person stepped out of camera view, but has an active tour session OR has been assigned
+        elif all_sales and active_visitors:
+            # Pick the primary sales agent (either currently active session's owner or first assigned sales agent)
+            sp = None
+            for candidate in all_sales:
+                if candidate.global_id in self._active_sessions:
+                    sp = candidate
+                    break
+            if sp is None:
+                sp = all_sales[0]
+
+            session = self._active_sessions.get(sp.global_id)
+            if session is None:
+                # Start tour session under this sales agent
+                sid = f"VISIT-{ts.strftime('%Y%m%d')}-{self._session_counter:03d}"
+                self._session_counter += 1
+                session = FlatVisitSession(
+                    session_id=sid,
+                    sales_person_id=sp.global_id,
+                    sales_person_name=sp.display_name,
+                    accompanying_visitor_ids=list(active_visitor_ids),
+                    start_time=ts,
+                    last_activity_time=ts,
+                    is_active=True,
+                )
+                self._active_sessions[sp.global_id] = session
+                self.log_event(
+                    "session_start",
+                    f"Sales Tour ({sid}) ongoing with {len(active_visitor_ids)} visitor(s) under {sp.display_name}.",
+                    timestamp=ts,
+                    session_id=sid,
+                    person_id=sp.global_id,
+                    role="sales_person",
+                )
+            else:
+                # Continue adding and tracking visitors under this sales agent
+                prev_visitors = set(session.accompanying_visitor_ids)
+                session.update_activity(ts, active_visitor_ids)
+                new_joined = set(session.accompanying_visitor_ids) - prev_visitors
+                for n_vid in new_joined:
+                    v_person = gallery.get_person(n_vid)
+                    v_name = v_person.display_name if v_person else n_vid
+                    self.log_event(
+                        "visitor_joined",
+                        f"{v_name} ({n_vid}) joined flat visit session {session.session_id}.",
+                        timestamp=ts,
+                        session_id=session.session_id,
+                        person_id=n_vid,
+                        role="visitor",
+                    )
+
+        # Case C: If no sales person is designated yet, but visitors are present in the flat
         elif active_visitors and self.flat_cfg.auto_detect_sessions:
-            # Check for general visitor session
             general_key = "__general_visit__"
             session = self._active_sessions.get(general_key)
             if session is None:
@@ -247,6 +313,55 @@ class FlatVisitTracker:
                     timestamp=ts,
                     session_id=session.session_id,
                 )
+
+    def assign_sales_agent(self, global_id: str, is_sales: bool = True, name: Optional[str] = None) -> None:
+        """
+        Dynamically designates or reassigns a person as Sales Agent or Visitor across all sessions.
+        Ensures that existing, active, or historical sessions reflect this sales agent immediately.
+        """
+        display_name = name or global_id
+        if is_sales:
+            # 1. Update any in-progress or historical sessions where this person was present or unassigned
+            all_sess = self.get_all_sessions()
+            for session in all_sess:
+                if session.sales_person_id == global_id:
+                    if name:
+                        session.sales_person_name = name
+                elif session.sales_person_id in ("UNASSIGNED", "") or not session.sales_person_id:
+                    # Assign this agent as the leader of this session
+                    session.sales_person_id = global_id
+                    session.sales_person_name = display_name
+                    if global_id in session.accompanying_visitor_ids:
+                        session.accompanying_visitor_ids.remove(global_id)
+                elif global_id in session.accompanying_visitor_ids:
+                    session.accompanying_visitor_ids.remove(global_id)
+
+            # 2. Check active sessions map
+            if "__general_visit__" in self._active_sessions:
+                gen_s = self._active_sessions.pop("__general_visit__")
+                gen_s.sales_person_id = global_id
+                gen_s.sales_person_name = display_name
+                if global_id in gen_s.accompanying_visitor_ids:
+                    gen_s.accompanying_visitor_ids.remove(global_id)
+                self._active_sessions[global_id] = gen_s
+
+            self.log_event(
+                "agent_assigned",
+                f"👔 {display_name} ({global_id}) designated as Sales Agent.",
+                person_id=global_id,
+                role="sales_person",
+            )
+        else:
+            # Revert from sales person back to visitor
+            for session in self.get_all_sessions():
+                if session.sales_person_id == global_id:
+                    session.sales_person_id = "UNASSIGNED"
+                    session.sales_person_name = "Self / Unassigned Agent"
+                    if global_id not in session.accompanying_visitor_ids:
+                        session.accompanying_visitor_ids.append(global_id)
+            if global_id in self._active_sessions:
+                s = self._active_sessions.pop(global_id)
+                self._active_sessions["__general_visit__"] = s
 
     def get_active_sessions(self) -> List[FlatVisitSession]:
         return list(self._active_sessions.values())
@@ -313,12 +428,21 @@ class FlatVisitTracker:
 
             active_s = self._active_sessions.get(p.global_id)
 
+            if active_s and active_s.visitor_count > 0:
+                status_str = f"🟢 Leading Tour ({active_s.session_id} · {active_s.visitor_count} clients)" if p.is_active else f"🚶 Tour Ongoing ({active_s.session_id} · {active_s.visitor_count} clients in flat)"
+            elif active_s:
+                status_str = f"🟢 Tour Started ({active_s.session_id})" if p.is_active else f"🚶 Tour Active ({active_s.session_id})"
+            elif p.is_active:
+                status_str = "🟢 In Flat (Standby)"
+            else:
+                status_str = "⚪ Away / Off-duty"
+
             records.append({
                 "sales_person_id": p.global_id,
                 "name": p.display_name,
                 "role": "Sales Agent",
                 "is_active": p.is_active,
-                "current_status": f"Leading Tour ({active_s.session_id})" if active_s else ("In Flat (Standby)" if p.is_active else "Away / Off-duty"),
+                "current_status": status_str,
                 "total_visits_conducted": total_visits_conducted,
                 "total_visitors_shown": total_visitors_shown,
                 "total_duty_seconds": total_duty_sec,

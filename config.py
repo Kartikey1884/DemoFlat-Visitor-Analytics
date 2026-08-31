@@ -41,7 +41,7 @@ class Paths:
 class DetectionConfig:
     model_path: str = "yolo11s.pt"
     device: str = "auto"
-    confidence: float = 0.35
+    confidence: float = 0.45
     iou: float = 0.5
     image_size: int = 640
     max_detections: int = 300
@@ -77,7 +77,7 @@ class ReIDConfig:
 class LLMConfig:
     enabled: bool = True
     provider: str = "groq"  # "groq", "gemini", "openai", "claude", "ollama", "local"
-    model_name: str = "llama-3.3-70b-versatile"
+    model_name: str = "openai/gpt-oss-120b"
     api_key: str = ""
     base_url: str = ""
     temperature: float = 0.1

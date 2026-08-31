@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,34 +24,56 @@ HTTP_HEADERS = {
     "Accept": "application/json",
 }
 
-# Supported LLM Providers & default models
+# Supported LLM Providers & default models (including latest free-tier models)
 LLM_PROVIDERS_CONFIG = {
     "groq": {
-        "name": "Groq (High-Speed LLM & Vision)",
-        "default_model": "llama-3.3-70b-versatile",
+        "name": "Groq (High-Speed Free Tier LLM & Vision)",
+        "default_model": "allam-2-7b",
         "available_models": [
-            "llama-3.3-70b-versatile",
-            "meta-llama/llama-4-scout-vision",
-            "qwen-2.5-vl-72b-instruct",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
-            "gemma2-9b-it",
+            "allam-2-7b",
+            "groq/compound-mini",
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
+            "groq/compound",
         ],
         "default_endpoint": "https://api.groq.com/openai/v1/chat/completions",
         "key_env_var": "GROQ_API_KEY",
         "key_prefix": "gsk_",
     },
     "gemini": {
-        "name": "Google Gemini",
+        "name": "Google Gemini (Free AI Studio Tier)",
         "default_model": "gemini-1.5-flash",
         "available_models": [
             "gemini-1.5-flash",
-            "gemini-2.0-flash",
             "gemini-1.5-pro",
+            "gemini-1.5-flash-8b",
+            "gemini-2.5-flash",
+            "gemini-3.6-flash",
         ],
         "default_endpoint": "https://generativelanguage.googleapis.com/v1beta/models",
         "key_env_var": "GEMINI_API_KEY",
         "key_prefix": "AIza",
+    },
+    "local": {
+        "name": "Built-in Local Vision Engine (100% Free & Offline)",
+        "default_model": "color-spatial-clustering",
+        "available_models": ["color-spatial-clustering"],
+        "default_endpoint": "",
+        "key_env_var": "",
+        "key_prefix": "",
+    },
+    "ollama": {
+        "name": "Ollama / Local Custom Vision (100% Free)",
+        "default_model": "llama3.2-vision",
+        "available_models": [
+            "llama3.2-vision",
+            "llava",
+            "minicpm-v",
+            "qwen2.5-coder",
+        ],
+        "default_endpoint": "http://localhost:11434/v1/chat/completions",
+        "key_env_var": "OLLAMA_API_KEY",
+        "key_prefix": "",
     },
     "openai": {
         "name": "OpenAI",
@@ -74,26 +97,6 @@ LLM_PROVIDERS_CONFIG = {
         "key_env_var": "ANTHROPIC_API_KEY",
         "key_prefix": "sk-ant-",
     },
-    "ollama": {
-        "name": "Ollama / Custom Vision API",
-        "default_model": "llama3.2-vision",
-        "available_models": [
-            "llama3.2-vision",
-            "llava",
-            "minicpm-v",
-        ],
-        "default_endpoint": "http://localhost:11434/v1/chat/completions",
-        "key_env_var": "OLLAMA_API_KEY",
-        "key_prefix": "",
-    },
-    "local": {
-        "name": "Built-in Local Vision Engine (Offline)",
-        "default_model": "color-spatial-clustering",
-        "available_models": ["color-spatial-clustering"],
-        "default_endpoint": "",
-        "key_env_var": "",
-        "key_prefix": "",
-    },
 }
 
 
@@ -106,26 +109,30 @@ class PersonSemanticProfile:
     accessories: List[str] = field(default_factory=list)
     build_and_gender: str = "Person"
     persona_summary: str = "Person in frame"
-    suggested_role: str = "visitor"  # "sales_person" or "visitor"
-    role_confidence: float = 0.85
-    role_reasoning: str = "Standard visitor appearance"
-    extracted_by: str = "local_vision"
+    suggested_role: str = "visitor"
+    role_confidence: float = 0.8
+    role_reasoning: str = ""
+    is_human: bool = True
+    is_tv_or_animal: bool = False
+    extracted_by: str = "vision"
     extracted_at: datetime = field(default_factory=datetime.now)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "upper_clothing": self.upper_clothing,
             "upper_color": self.upper_color,
             "lower_clothing": self.lower_clothing,
             "lower_color": self.lower_color,
-            "accessories": list(self.accessories),
+            "accessories": self.accessories,
             "build_and_gender": self.build_and_gender,
             "persona_summary": self.persona_summary,
             "suggested_role": self.suggested_role,
-            "role_confidence": round(self.role_confidence, 2),
+            "role_confidence": self.role_confidence,
             "role_reasoning": self.role_reasoning,
+            "is_human": self.is_human,
+            "is_tv_or_animal": self.is_tv_or_animal,
             "extracted_by": self.extracted_by,
-            "extracted_at": self.extracted_at.strftime("%H:%M:%S"),
+            "extracted_at": self.extracted_at.isoformat() if self.extracted_at else None,
         }
 
 
@@ -155,13 +162,17 @@ class LLMReIDDecision:
 
 class LLMPersonProfiler:
     """
-    Multimodal Vision LLM & Semantic Persona Profiler.
-    Dynamically supports Groq, Gemini, OpenAI, Claude, Ollama, and Local Vision.
-    Performs AI visual attribute extraction, persona profiling, and LLM Re-ID decision arbitration.
+    Asynchronous LLM Visual Persona Profiler & Re-ID Arbitrator.
+    Supports Groq, Gemini, OpenAI, Claude, Ollama, and Local Fallback.
     """
 
     def __init__(self, config: Optional[Config] = None) -> None:
         self.config = config or get_config()
+        self.llm_cfg = self.config.llm
+        self.executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="llm_profiler")
+        self._cache: Dict[str, PersonSemanticProfile] = {}
+        self._llm_decisions: List[LLMReIDDecision] = []
+        self._rate_limited_until: Dict[str, float] = {}
         self._executor_lock = threading.Lock()
         self._pending_tasks: set[str] = set()
 
@@ -176,6 +187,18 @@ class LLMPersonProfiler:
                 if resp.status_code == 200:
                     data = resp.json()
                     models = [m["id"] for m in data.get("data", []) if "whisper" not in m["id"].lower()]
+                    return sorted(models)
+            elif provider == "gemini" and api_key:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+                resp = requests.get(url, headers=HTTP_HEADERS, timeout=6.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = [
+                        m["name"].replace("models/", "")
+                        for m in data.get("models", [])
+                        if "generateContent" in m.get("supportedGenerationMethods", [])
+                        and not m["name"].startswith("models/embedding")
+                    ]
                     return sorted(models)
             elif provider == "openai" and api_key:
                 url = "https://api.openai.com/v1/models"
@@ -525,23 +548,28 @@ class LLMPersonProfiler:
                     )
                 logger.info("Groq vision call returned %d for %s. Using Groq hybrid reasoning.", resp.status_code, model)
 
-            # 2. Hybrid Visual Reasoning (works for llama-3.3-70b-versatile, llama-3.1-8b, mixtral, etc.)
+            # 2. Hybrid Visual Reasoning (works for 120b, compound, allam, llama, etc.)
             local_prof = self._extract_local_vision_profile(crop, global_id)
             reasoning_prompt = (
-                f"You are an AI CCTV Biometric Profiler. A visual feature extractor detected the following attributes from a camera crop:\n"
+                f"You are an AI CCTV Biometric Profiler for real estate flat visits.\n"
+                f"A visual feature detector extracted these attributes from a bounding box crop:\n"
                 f"- Upper clothing: {local_prof.upper_clothing} (dominant color: {local_prof.upper_color})\n"
                 f"- Lower clothing: {local_prof.lower_clothing} (dominant color: {local_prof.lower_color})\n"
-                f"- Detected Accessories: {', '.join(local_prof.accessories) if local_prof.accessories else 'None'}\n"
-                f"- Build: {local_prof.build_and_gender}\n\n"
-                f"Reason over these visual attributes and output ONLY a valid JSON object describing the person:\n"
+                f"- Accessories: {', '.join(local_prof.accessories) if local_prof.accessories else 'None'}\n"
+                f"- Build: {local_prof.build_and_gender}\n"
+                f"- Initial Assessment: {'Real Human' if local_prof.is_human else 'Non-human / Animal / TV Screen'}\n\n"
+                f"Analyze if this is a REAL HUMAN BEING (visitor/staff) or an ANIMAL (e.g. horse, dog, wildlife on a TV screen/poster) / inanimate object.\n"
+                f"Output ONLY a valid JSON object:\n"
                 "{\n"
+                f'  "is_human": {json.dumps(local_prof.is_human)},\n'
+                f'  "is_tv_or_animal": {json.dumps(local_prof.is_tv_or_animal)},\n'
                 f'  "upper_clothing": "{local_prof.upper_clothing}",\n'
                 f'  "upper_color": "{local_prof.upper_color}",\n'
                 f'  "lower_clothing": "{local_prof.lower_clothing}",\n'
                 f'  "lower_color": "{local_prof.lower_color}",\n'
                 f'  "accessories": {json.dumps(local_prof.accessories)},\n'
                 f'  "build_and_gender": "{local_prof.build_and_gender}",\n'
-                '  "persona_summary": "One comprehensive visual description sentence (e.g. Male in light blue formal shirt and dark trousers with blue shoe covers)"\n'
+                '  "persona_summary": "One concise sentence describing the person (or indicating non-human/TV screen if applicable)"\n'
                 "}\n"
                 "Return raw JSON only."
             )
@@ -568,8 +596,24 @@ class LLMPersonProfiler:
 
             result = resp.json()
             text = result["choices"][0]["message"]["content"]
-            clean_text = text.replace("```json", "").replace("```", "").strip()
-            data = json.loads(clean_text)
+            clean_text = text.strip()
+            if "```" in clean_text:
+                parts = clean_text.split("```")
+                for part in parts:
+                    if "{" in part and "}" in part:
+                        clean_text = part.replace("json", "").strip()
+                        break
+            if "{" in clean_text and "}" in clean_text:
+                s_idx = clean_text.find("{")
+                e_idx = clean_text.rfind("}") + 1
+                clean_text = clean_text[s_idx:e_idx]
+            try:
+                data = json.loads(clean_text)
+            except Exception:
+                data = {}
+
+            is_human = data.get("is_human", local_prof.is_human)
+            is_tv_or_animal = data.get("is_tv_or_animal", local_prof.is_tv_or_animal)
 
             return PersonSemanticProfile(
                 upper_clothing=data.get("upper_clothing", local_prof.upper_clothing),
@@ -579,6 +623,9 @@ class LLMPersonProfiler:
                 accessories=data.get("accessories", local_prof.accessories),
                 build_and_gender=data.get("build_and_gender", local_prof.build_and_gender),
                 persona_summary=data.get("persona_summary", local_prof.persona_summary),
+                is_human=is_human,
+                is_tv_or_animal=is_tv_or_animal,
+                suggested_role="visitor" if is_human and not is_tv_or_animal else "non_human",
                 extracted_by=f"groq:{model}",
                 extracted_at=datetime.now(),
             )
@@ -601,8 +648,7 @@ class LLMPersonProfiler:
             _, buf = cv2.imencode(".jpg", crop)
             b64_img = base64.b64encode(buf).decode("utf-8")
 
-            model = model_name or "gemini-1.5-flash"
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            model = (model_name or "gemini-2.5-flash").replace("models/", "").strip()
             headers = {**HTTP_HEADERS, "Content-Type": "application/json"}
 
             prompt = (
@@ -630,11 +676,33 @@ class LLMPersonProfiler:
                 "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300}
             }
 
-            resp = requests.post(url, headers=headers, json=payload, timeout=8.0)
-            if resp.status_code != 200:
-                err_text = resp.text
+            # Try v1beta then v1 endpoint
+            urls_to_try = [
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+                f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}",
+            ]
+
+            resp = None
+            last_err = ""
+            for url in urls_to_try:
+                try:
+                    resp = requests.post(url, headers=headers, json=payload, timeout=8.0)
+                    if resp.status_code == 200:
+                        break
+                    else:
+                        last_err = resp.text
+                except Exception as req_err:
+                    last_err = str(req_err)
+
+            if resp is None or resp.status_code != 200:
                 if raise_on_error:
-                    raise ValueError(f"Gemini API HTTP {resp.status_code}: {err_text}")
+                    msg = last_err
+                    try:
+                        err_json = json.loads(last_err)
+                        msg = err_json.get("error", {}).get("message", last_err)
+                    except Exception:
+                        pass
+                    raise ValueError(f"Gemini API HTTP {resp.status_code if resp else 500}: {msg}")
                 return None
 
             result = resp.json()
@@ -848,51 +916,89 @@ class LLMPersonProfiler:
 
     def _extract_local_vision_profile(self, crop: np.ndarray, global_id: str) -> PersonSemanticProfile:
         """Deterministic local vision attribute extractor for offline semantic descriptions."""
+        if crop is None or crop.size == 0:
+            return PersonSemanticProfile()
         h, w = crop.shape[:2]
-
-        upper_crop = crop[int(h * 0.15) : int(h * 0.50), int(w * 0.15) : int(w * 0.85)]
-        lower_crop = crop[int(h * 0.50) : int(h * 0.90), int(w * 0.15) : int(w * 0.85)]
-        feet_crop = crop[int(h * 0.88) :, int(w * 0.15) : int(w * 0.85)]
-
-        upper_color = self._get_dominant_color_name(upper_crop)
-        lower_color = self._get_dominant_color_name(lower_crop)
-        feet_color = self._get_dominant_color_name(feet_crop)
-
-        accessories = []
-        if "Blue" in feet_color or "Light Blue" in feet_color:
-            accessories.append("Blue Shoe Covers")
-
-        head_crop = crop[0 : int(h * 0.20), :]
-        if head_crop.size > 0:
-            hsv_head = cv2.cvtColor(head_crop, cv2.COLOR_BGR2HSV)
-            face_lower = hsv_head[int(head_crop.shape[0] * 0.5) :, :]
-            if face_lower.size > 0:
-                mean_s = np.mean(face_lower[:, :, 1])
-                mean_v = np.mean(face_lower[:, :, 2])
-                if mean_v > 180 and mean_s < 80:
-                    accessories.append("Face Mask")
-
         aspect_ratio = h / max(w, 1)
-        build_str = "Tall build" if aspect_ratio > 2.8 else "Medium athletic build"
+        is_partial_head = (aspect_ratio < 1.35 or h < 85)
 
-        # Attire Role Classification (Sales Agent Formal Dress vs Casual Visitor)
-        is_formal_top = upper_color in ["White", "Light Blue", "Navy Blue", "Black / Dark", "Grey"]
-        is_formal_bottom = lower_color in ["Black / Dark", "Grey", "Navy Blue", "Neutral Dark"]
-        
-        if is_formal_top and is_formal_bottom:
-            suggested_role = "sales_person"
-            role_conf = 0.82
-            role_reason = f"Formal business attire detected ({upper_color} collared top + {lower_color} trousers)"
-        else:
+        # Detect non-human artifacts (animals on TV, wide objects, posters)
+        is_non_human = (aspect_ratio < 0.90) or (h < 40 and w < 30)
+
+        if is_non_human:
+            is_human = False
+            is_tv_or_animal = True
+            upper_desc = "Non-human object"
+            lower_desc = "Non-human object"
+            upper_color = "Unknown"
+            lower_color = "Unknown"
+            accessories = []
+            build_str = "Non-human"
+            suggested_role = "non_human"
+            role_conf = 0.90
+            role_reason = "Non-human aspect ratio / TV screen artifact"
+            summary = "Non-human object / TV screen video detected"
+        elif is_partial_head:
+            is_human = True
+            is_tv_or_animal = False
+            # Crop is predominantly head/shoulders
+            upper_crop = crop[int(h * 0.35) :, int(w * 0.10) : int(w * 0.90)]
+            upper_color = self._get_dominant_color_name(upper_crop)
+            lower_color = "Occluded / Partial View"
+            feet_color = "None"
+            accessories = []
+            build_str = "Seated / Partial view"
+            upper_desc = f"{upper_color} Top/Shirt"
+            lower_desc = "Lower body occluded"
             suggested_role = "visitor"
-            role_conf = 0.88
-            role_reason = f"Casual attire ({upper_color} top + {lower_color} bottom)"
+            role_conf = 0.70
+            role_reason = "Partial upper body / head view"
+            summary = f"Person in {upper_color} top (Head & upper body visible)"
+        else:
+            is_human = True
+            is_tv_or_animal = False
+            upper_crop = crop[int(h * 0.15) : int(h * 0.50), int(w * 0.15) : int(w * 0.85)]
+            lower_crop = crop[int(h * 0.50) : int(h * 0.90), int(w * 0.15) : int(w * 0.85)]
+            feet_crop = crop[int(h * 0.88) :, int(w * 0.15) : int(w * 0.85)]
 
-        upper_desc = f"{upper_color} Top/Shirt"
-        lower_desc = f"{lower_color} Pants/Trousers"
-        acc_str = f" with {', '.join(accessories)}" if accessories else ""
-        role_label = " [Sales Agent]" if suggested_role == "sales_person" else ""
-        summary = f"Person in {upper_color} shirt and {lower_color} trousers{acc_str} ({build_str}){role_label}"
+            upper_color = self._get_dominant_color_name(upper_crop)
+            lower_color = self._get_dominant_color_name(lower_crop)
+            feet_color = self._get_dominant_color_name(feet_crop)
+
+            accessories = []
+            if "Blue" in feet_color or "Light Blue" in feet_color:
+                accessories.append("Blue Shoe Covers")
+
+            head_crop = crop[0 : int(h * 0.20), :]
+            if head_crop.size > 0:
+                hsv_head = cv2.cvtColor(head_crop, cv2.COLOR_BGR2HSV)
+                face_lower = hsv_head[int(head_crop.shape[0] * 0.5) :, :]
+                if face_lower.size > 0:
+                    mean_s = np.mean(face_lower[:, :, 1])
+                    mean_v = np.mean(face_lower[:, :, 2])
+                    if mean_v > 180 and mean_s < 80:
+                        accessories.append("Face Mask")
+
+            build_str = "Tall build" if aspect_ratio > 2.8 else "Medium athletic build"
+
+            # Attire Role Classification (Sales Agent Formal Dress vs Casual Visitor)
+            is_formal_top = upper_color in ["White", "Light Blue", "Navy Blue", "Black / Dark", "Grey"]
+            is_formal_bottom = lower_color in ["Black / Dark", "Grey", "Navy Blue", "Neutral Dark"]
+            
+            if is_formal_top and is_formal_bottom:
+                suggested_role = "sales_person"
+                role_conf = 0.82
+                role_reason = f"Formal business attire detected ({upper_color} collared top + {lower_color} trousers)"
+            else:
+                suggested_role = "visitor"
+                role_conf = 0.88
+                role_reason = f"Casual attire ({upper_color} top + {lower_color} bottom)"
+
+            upper_desc = f"{upper_color} Top/Shirt"
+            lower_desc = f"{lower_color} Pants/Trousers"
+            acc_str = f" with {', '.join(accessories)}" if accessories else ""
+            role_label = " [Sales Agent]" if suggested_role == "sales_person" else ""
+            summary = f"Person in {upper_color} shirt and {lower_color} trousers{acc_str} ({build_str}){role_label}"
 
         return PersonSemanticProfile(
             upper_clothing=upper_desc,
@@ -905,6 +1011,8 @@ class LLMPersonProfiler:
             suggested_role=suggested_role,
             role_confidence=role_conf,
             role_reasoning=role_reason,
+            is_human=is_human,
+            is_tv_or_animal=is_tv_or_animal,
             extracted_by="local_vision",
             extracted_at=datetime.now(),
         )

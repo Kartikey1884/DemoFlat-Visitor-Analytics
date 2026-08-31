@@ -136,7 +136,7 @@ def render() -> None:
                         is_sales_role = st.checkbox("Sales Agent Role", value=(curr_p.role == "sales_person") if curr_p else False, key="flat_sp_chk")
                     with col_save:
                         if st.button("Save Role", key="flat_sp_save", use_container_width=True):
-                            gallery.designate_sales_person(sel_id, is_sales=is_sales_role, name=new_agent_name)
+                            state.designate_sales_agent(sel_id, is_sales=is_sales_role, name=new_agent_name)
                             st.success(f"Updated {sel_id} successfully!")
                             st.rerun()
 

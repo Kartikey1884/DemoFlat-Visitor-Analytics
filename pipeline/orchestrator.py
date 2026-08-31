@@ -131,6 +131,23 @@ class AnalyticsOrchestrator:
 
         return result
 
+    def designate_sales_agent(self, global_id: str, is_sales: bool = True, name: Optional[str] = None) -> None:
+        """
+        Dynamically updates a person's role across Gallery, TrackManager, FlatVisitTracker, and active bounding boxes.
+        """
+        gallery = getattr(self.engine.manager, "gallery", None)
+        if gallery is not None:
+            gallery.designate_sales_person(global_id, is_sales=is_sales, name=name)
+
+        if hasattr(self.engine, "manager") and hasattr(self.engine.manager, "set_person_role"):
+            role_str = "sales_person" if is_sales else "visitor"
+            self.engine.manager.set_person_role(global_id, role=role_str, name=name)
+
+        if hasattr(self, "flat_visits"):
+            self.flat_visits.assign_sales_agent(global_id, is_sales=is_sales, name=name)
+
+        logger.info("Orchestrator updated %s role to %s (Sales: %s, Name: %s).", global_id, "sales_person" if is_sales else "visitor", is_sales, name)
+
     def reset(self) -> None:
         self.engine.reset()
         self.flat_visits.reset()

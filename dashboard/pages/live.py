@@ -132,6 +132,7 @@ def _source_controls() -> None:
 
 @st.fragment(run_every=1.0)
 def _live_view() -> None:
+    cfg = state.get_config_cached()
     result = state.get_latest_frame_result()
     orch = state.get_orchestrator(create=False)
 
@@ -234,16 +235,26 @@ def _live_view() -> None:
         if gallery and gallery.get_all_persons():
             persons_list = gallery.get_all_persons()
             selected_gid = st.selectbox(
-                "Designate Sales Agent",
+                "⚡ Quick Sales Agent Designation",
                 [p.global_id for p in persons_list],
-                format_func=lambda x: f"{x} - {gallery.get_person(x).display_name} ({gallery.get_person(x).role})",
+                format_func=lambda x: f"{x} - {gallery.get_person(x).display_name} ({'👔 Sales' if gallery.get_person(x).role == 'sales_person' else '🧑 Visitor'})",
+                key="live_quick_agent_select",
             )
-            if st.button("Toggle Sales / Visitor Role", use_container_width=True):
-                p = gallery.get_person(selected_gid)
-                if p:
-                    new_role = (p.role != "sales_person")
-                    gallery.designate_sales_person(selected_gid, is_sales=new_role)
+            col_tg1, col_tg2 = st.columns([1, 1])
+            with col_tg1:
+                cur_p = gallery.get_person(selected_gid)
+                cur_is_sales = (cur_p.role == "sales_person") if cur_p else False
+                btn_label = "Set as 🧑 Visitor" if cur_is_sales else "Promote to 👔 Sales Agent"
+                if st.button(btn_label, use_container_width=True, key="live_btn_toggle_role"):
+                    new_role = not cur_is_sales
+                    state.designate_sales_agent(selected_gid, is_sales=new_role)
                     st.success(f"Updated {selected_gid} to {'Sales Agent' if new_role else 'Visitor'}!")
+                    st.rerun()
+            with col_tg2:
+                agent_name = st.text_input("Name", value=cur_p.display_name if cur_p else "", key="live_agent_name", label_visibility="collapsed", placeholder="Agent Name")
+                if st.button("Save Name", use_container_width=True, key="live_btn_save_name"):
+                    state.designate_sales_agent(selected_gid, is_sales=cur_is_sales, name=agent_name)
+                    st.success(f"Renamed {selected_gid} to {agent_name}!")
                     st.rerun()
 
 

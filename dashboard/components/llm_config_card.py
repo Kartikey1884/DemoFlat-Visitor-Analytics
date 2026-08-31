@@ -60,6 +60,7 @@ def render_llm_config_card(cfg: Optional[Config] = None, db: Optional[Any] = Non
                 st.text_input("Vision Engine", value="Built-in Color-Spatial Clustering", disabled=True)
                 model_name = "color-spatial-clustering"
             else:
+                default_mod = prov_info.get("default_model", avail_models[0] if avail_models else "")
                 model_idx = avail_models.index(curr_model) if curr_model in avail_models else 0
                 chosen_model = st.selectbox(
                     "Model Name",
@@ -68,7 +69,8 @@ def render_llm_config_card(cfg: Optional[Config] = None, db: Optional[Any] = Non
                     key=f"ui_llm_model_{provider_key}",
                 )
                 if chosen_model == "Custom Model Name...":
-                    model_name = st.text_input("Enter Custom Model Name", value=curr_model, key="ui_llm_custom_model")
+                    custom_default = curr_model if curr_model not in avail_models else default_mod
+                    model_name = st.text_input("Enter Custom Model Name", value=custom_default, key="ui_llm_custom_model", placeholder=default_mod)
                 else:
                     model_name = chosen_model
 
@@ -104,7 +106,7 @@ def render_llm_config_card(cfg: Optional[Config] = None, db: Optional[Any] = Non
         # Action Buttons: Fetch Models, Test Connection, Save
         c_fetch, c_test, c_save = st.columns([1, 1, 1])
         with c_fetch:
-            if provider_key in ["groq", "openai", "ollama"]:
+            if provider_key in ["groq", "gemini", "openai", "ollama"]:
                 if st.button("🔄 Fetch Live Models", use_container_width=True, key=f"fetch_btn_{provider_key}"):
                     if not api_key and provider_key != "ollama":
                         st.warning("Please enter your API Key first.")

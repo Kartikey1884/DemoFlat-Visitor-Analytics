@@ -134,7 +134,7 @@ def render() -> None:
                     new_name = st.text_input(f"Name for {p.global_id}", value=p.display_name, key=f"name_{p.global_id}")
                     is_sales = st.checkbox("Mark as Sales Person", value=(p.role == "sales_person"), key=f"role_{p.global_id}")
                     if st.button("Save Changes", key=f"btn_{p.global_id}"):
-                        gallery.designate_sales_person(p.global_id, is_sales=is_sales, name=new_name)
+                        state.designate_sales_agent(p.global_id, is_sales=is_sales, name=new_name)
                         st.success("Updated!")
                         st.rerun()
 

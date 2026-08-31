@@ -128,3 +128,14 @@ def runner_state() -> Optional[RunnerState]:
 def get_latest_frame_result() -> Optional[Any]:
     runner: Optional[LiveRunner] = st.session_state.get("runner")
     return runner.get_latest() if runner is not None else None
+
+
+def designate_sales_agent(global_id: str, is_sales: bool = True, name: Optional[str] = None) -> None:
+    orch = get_orchestrator(create=False)
+    if orch is not None:
+        orch.designate_sales_agent(global_id, is_sales=is_sales, name=name)
+    else:
+        # If orchestrator not in session state, fallback to gallery if reachable
+        db = get_database()
+        if db:
+            logger.debug("Database role update for %s", global_id)

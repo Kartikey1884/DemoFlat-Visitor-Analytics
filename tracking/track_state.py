@@ -67,10 +67,12 @@ class TrackState:
     @property
     def display_label(self) -> str:
         if self.global_person is not None:
-            role_tag = "Sales Agent" if self.role == "sales_person" else "Visitor"
+            role = self.global_person.role or self.role
+            role_tag = "👔 Sales Agent" if role == "sales_person" else "🧑 Visitor"
             dwell_str = self._format_seconds(self.duration_seconds)
-            return f"[{role_tag} {self.global_person.global_id} | {dwell_str}]"
-        return f"[Tracking #{self.track_id} · Awaiting Face]"
+            name_str = f" ({self.global_person.display_name})" if (self.global_person.display_name and not self.global_person.display_name.startswith("Visitor #")) else ""
+            return f"[{role_tag} {self.global_person.global_id}{name_str} | {dwell_str}]"
+        return f"[Tracking #{self.track_id}]"
 
     def _format_seconds(self, s: float) -> str:
         sec = int(s)
@@ -132,24 +134,16 @@ class TrackManager:
     ) -> TrackFrameResult:
         ts = timestamp or utcnow()
         entered: List[TrackState] = []
-        current_ids: set[int] = set()
+        current_ids: set[int] = {int(d.tracker_id) for d in detections if d.tracker_id is not None}
 
         for det in detections:
             if det.tracker_id is None:
                 continue
             tid = int(det.tracker_id)
-            current_ids.add(tid)
 
             state = self._states.get(tid)
             if state is None:
-                # Brand new track entering frame
-                if frame is not None and len(frame.shape) >= 2:
-                    gp, is_new, sim = self.gallery.match_or_create(frame, det.box, tid, ts)
-                else:
-                    gp = self.gallery.get_by_track(tid)
-
-                role = gp.role if gp else "visitor"
-                gid = gp.global_id if gp else None
+                # Provisional new track entering frame
                 state = TrackState(
                     track_id=tid,
                     class_id=det.class_id,
@@ -160,35 +154,34 @@ class TrackManager:
                     last_box=det.box,
                     trajectory=[det.anchor],
                     max_trajectory=self.max_trajectory,
-                    role=role,
-                    global_id=gid,
-                    global_person=gp,
+                    role="visitor",
+                    global_id=None,
+                    global_person=None,
                 )
                 self._states[tid] = state
                 entered.append(state)
                 logger.debug(
-                    "Track %d (Global: %s, Confirmed: %s) entered at frame %d.",
+                    "Provisional Track %d entered at frame %d.",
                     tid,
-                    gid,
-                    state.is_confirmed,
                     frame_index,
                 )
             else:
                 # Existing track continuing in frame
                 state.update(det.box, det.anchor, ts, frame_index)
                 if frame is not None and len(frame.shape) >= 2:
-                    gp = self.gallery.update_active_person_appearance(frame, det.box, tid, ts)
-                    # If this track was provisional and has just been confirmed via face view:
-                    if state.global_person is None and gp is not None:
-                        state.global_person = gp
-                        state.global_id = gp.global_id
-                        state.role = gp.role
-                        logger.info(
-                            "✅ Track #%d successfully confirmed as %s (%s) upon frontal face detection.",
-                            tid,
-                            gp.global_id,
-                            gp.display_name,
+                    # Confirm real human presence after track persists (> 3 hits)
+                    if state.global_person is None and state.hits >= 4:
+                        gp, is_new, sim = self.gallery.match_or_create(
+                            frame, det.box, tid, ts, active_frame_track_ids=current_ids
                         )
+                        state.global_person = gp
+                        state.global_id = gp.global_id if gp else None
+                        state.role = gp.role if gp else "visitor"
+                        logger.info("Confirmed Track %d as %s (%s).", tid, state.global_id, state.role)
+                    elif state.global_person is not None:
+                        gp = self.gallery.update_active_person_appearance(frame, det.box, tid, ts)
+                        if gp is not None and gp.role != state.role:
+                            state.role = gp.role
 
         exited: List[TrackState] = []
         for tid, state in self._states.items():
@@ -232,6 +225,17 @@ class TrackManager:
         state = self._states.get(track_id)
         if state is not None:
             state.role = role
+            if state.global_person:
+                state.global_person.role = role
+
+    def set_person_role(self, global_id: str, role: str, name: Optional[str] = None) -> None:
+        for s in self._states.values():
+            if s.global_id == global_id or (s.global_person and s.global_person.global_id == global_id):
+                s.role = role
+                if s.global_person:
+                    s.global_person.role = role
+                    if name:
+                        s.global_person.display_name = name
 
     def prune_finished(self, keep_last: int = 0) -> int:
         finished = sorted(

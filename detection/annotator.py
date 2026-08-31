@@ -81,6 +81,8 @@ class DetectionAnnotator:
             x1, y1, x2, y2 = (int(v) for v in det.xyxy)
             tstate = track_map.get(det.tracker_id) if det.tracker_id is not None else None
             role = getattr(tstate, "role", None)
+            if tstate and getattr(tstate, "global_person", None):
+                role = tstate.global_person.role or role
 
             color = self._color_for(det.class_id, det.tracker_id, role=role)
             cv2.rectangle(canvas, (x1, y1), (x2, y2), color, self.thickness)
